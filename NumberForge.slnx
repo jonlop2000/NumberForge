@@ -1,4 +1,5 @@
 <Solution>
   <Project Path="NumberForge.Console/NumberForge.Console.csproj" />
+  <Project Path="NumberForge.Core/NumberForge.Core.csproj" />
   <Project Path="NumberForge.Tests/NumberForge.Tests.csproj" />
 </Solution>

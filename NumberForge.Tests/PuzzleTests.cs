@@ -1,3 +1,5 @@
+using NumberForge.Core;
+
 namespace NumberForge.Tests;
 
 public class PuzzleTests

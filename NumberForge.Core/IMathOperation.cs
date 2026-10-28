@@ -1,3 +1,5 @@
+namespace NumberForge.Core;
+
 public interface IMathOperation
 {
     int Apply(int input);

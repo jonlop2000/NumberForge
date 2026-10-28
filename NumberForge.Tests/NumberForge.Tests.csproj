@@ -19,7 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\NumberForge.Console\NumberForge.Console.csproj" />
+    <ProjectReference Include="..\NumberForge.Core\NumberForge.Core.csproj" />
   </ItemGroup>
 
 </Project>

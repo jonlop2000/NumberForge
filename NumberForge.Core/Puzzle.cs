@@ -1,3 +1,5 @@
+namespace NumberForge.Core;
+
 public class Puzzle
 {
     public Puzzle(int startNumber, int targetNumber)
