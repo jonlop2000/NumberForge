@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\NumberForge.Core\NumberForge.Core.csproj" />
+    <ProjectReference Include="..\NumberForge.Api\NumberForge.Api.csproj" />
   </ItemGroup>
 
 </Project>

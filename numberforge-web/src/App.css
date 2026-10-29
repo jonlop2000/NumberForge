@@ -1,3 +1,49 @@
+/* Keep game controls consistent with the existing accent colors. */
+.start-game,
+.operation-card,
+.refresh-game {
+  font: inherit;
+  padding: 8px 16px;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.start-game:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+/* Cards can also be disabled because a game ended or needs a refresh. */
+.operation-card:disabled,
+.refresh-game:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.start-game:focus-visible,
+.operation-card:focus-visible,
+.refresh-game:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* Wrap cards and longer error messages so they remain usable on small screens. */
+.operation-list {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+}
+
+.game-feedback {
+  max-width: 48ch;
+}
+
 .counter {
   font-size: 16px;
   padding: 5px 10px;
