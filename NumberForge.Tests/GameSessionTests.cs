@@ -10,8 +10,16 @@ public class GameSessionTests
         // Arrange: define a puzzle that starts at 8 and targets 2.
         var puzzle = new Puzzle(8, 2);
 
+        // Supply three starting cards to check that the session exposes the whole hand.
+        var operations = new IMathOperation[]
+        {
+            new MathOperation(5),
+            new MultiplyOperation(2),
+            new MathOperation(-4)
+        };
+
         // Act: create an attempt with a limit of two moves.
-        var session = new GameSession(puzzle, 2);
+        var session = new GameSession(puzzle, 2, operations);
 
         // Assert: verify the starting number, unused moves, and move limit.
         Assert.Equal(8, session.CurrentNumber);
@@ -20,14 +28,52 @@ public class GameSessionTests
 
         // Assert.Same checks that the session stores this exact puzzle object.
         Assert.Same(puzzle, session.Puzzle);
+
+        // The starting hand preserves the supplied cards and their menu order.
+        Assert.Equal(3, session.AvailableOperations.Count);
+        Assert.Equal(operations, session.AvailableOperations);
+    }
+
+    [Fact]
+    public void Constructor_WhenStartingListChanges_PreservesSessionHand()
+    {
+        // Arrange: give two sessions the same starting list.
+        var addFive = new MathOperation(5);
+        var operations = new List<IMathOperation> { addFive };
+        var firstSession = new GameSession(new Puzzle(3, 12), 3, operations);
+        var secondSession = new GameSession(new Puzzle(3, 12), 3, operations);
+
+        // Act: edit the caller's list after both sessions have copied it.
+        operations.Clear();
+        operations.Add(new MultiplyOperation(2));
+
+        // Assert: neither session loses or replaces its starting card.
+        Assert.Single(firstSession.AvailableOperations);
+        Assert.Single(secondSession.AvailableOperations);
+        Assert.Same(addFive, firstSession.AvailableOperations[0]);
+        Assert.Same(addFive, secondSession.AvailableOperations[0]);
+    }
+
+    [Fact]
+    public void AvailableOperations_WhenCallerAttemptsToClearHand_RejectsChange()
+    {
+        // Arrange: even casting the read-only view to a collection must not allow edits.
+        var operations = new IMathOperation[] { new MathOperation(5) };
+        var session = new GameSession(new Puzzle(3, 12), 3, operations);
+        var hand = Assert.IsAssignableFrom<ICollection<IMathOperation>>(session.AvailableOperations);
+
+        // Act and assert: the wrapper rejects removal and the session keeps its card.
+        Assert.Throws<NotSupportedException>(() => hand.Clear());
+        Assert.Single(session.AvailableOperations);
     }
 
     [Fact]
     public void TryApplyOperation_WhenSessionIsActive_AppliesMove()
     {
         // Arrange: start at 8 with a target of 2 and two available moves.
-        var session = new GameSession(new Puzzle(8, 2), 2);
         var subtractThree = new MathOperation(-3);
+        // Include the operation in this session's starting hand.
+        var session = new GameSession(new Puzzle(8, 2), 2, new IMathOperation[] { subtractThree });
 
         // Act: attempt one move.
         bool accepted = session.TryApplyOperation(subtractThree);
@@ -36,18 +82,53 @@ public class GameSessionTests
         Assert.True(accepted);
         Assert.Equal(5, session.CurrentNumber);
         Assert.Equal(1, session.MovesUsed);
+
+        // Consuming the card empties the available hand while preserving its original position.
+        Assert.Empty(session.AvailableOperations);
+        Assert.Single(session.StartingOperations);
+        Assert.Same(subtractThree, session.StartingOperations[0]);
+    }
+
+    [Fact]
+    public void TryApplyOperation_WhenCardWasAlreadyUsed_RejectsMoveWithoutChangingState()
+    {
+        // Arrange: keep moves and other cards available so only card reuse can reject the move.
+        var addFive = new MathOperation(5);
+        var multiplyByTwo = new MultiplyOperation(2);
+        var subtractFour = new MathOperation(-4);
+        var operations = new IMathOperation[] { addFive, multiplyByTwo, subtractFour };
+        var session = new GameSession(new Puzzle(3, 12), 3, operations);
+
+        // Apply the card once and verify that it is consumed after the accepted move.
+        Assert.True(session.TryApplyOperation(addFive));
+        Assert.Equal(8, session.CurrentNumber);
+        Assert.Equal(1, session.MovesUsed);
+        Assert.Equal(2, session.AvailableOperations.Count);
+        Assert.DoesNotContain(addFive, session.AvailableOperations);
+
+        // Act: try the same card again while the session is still active.
+        bool accepted = session.TryApplyOperation(addFive);
+
+        // Assert: rejection preserves the number, move count, and remaining cards in order.
+        Assert.False(accepted);
+        Assert.Equal(8, session.CurrentNumber);
+        Assert.Equal(1, session.MovesUsed);
+        Assert.Equal(2, session.AvailableOperations.Count);
+        Assert.Equal(new IMathOperation[] { multiplyByTwo, subtractFour }, session.AvailableOperations);
     }
 
     [Fact]
     public void TryApplyOperation_OnFinalAllowedMove_CanReachTarget()
     {
         // Arrange: apply the first move so the session is at 5 with one move left.
-        var session = new GameSession(new Puzzle(8, 2), 2);
-        var subtractThree = new MathOperation(-3);
-        session.TryApplyOperation(subtractThree);
+        // Identical calculations can be separate cards, one for each move.
+        var firstCard = new MathOperation(-3);
+        var secondCard = new MathOperation(-3);
+        var session = new GameSession(new Puzzle(8, 2), 2, new IMathOperation[] { firstCard, secondCard });
+        session.TryApplyOperation(firstCard);
 
         // Act: attempt the final allowed move, taking 5 to the target of 2.
-        bool accepted = session.TryApplyOperation(subtractThree);
+        bool accepted = session.TryApplyOperation(secondCard);
 
         // Assert: reaching the target on the last available move is valid.
         Assert.True(accepted);
@@ -60,12 +141,14 @@ public class GameSessionTests
     {
         // Arrange: use the only allowed move. The number is 5, so the target is not reached.
         // This isolates the move-limit guard from the target-reached guard.
-        var session = new GameSession(new Puzzle(8, 2), 1);
-        var subtractThree = new MathOperation(-3);
-        session.TryApplyOperation(subtractThree);
+        // Leave a second card available so this test specifically checks the move limit.
+        var firstCard = new MathOperation(-3);
+        var secondCard = new MathOperation(-3);
+        var session = new GameSession(new Puzzle(8, 2), 1, new IMathOperation[] { firstCard, secondCard });
+        session.TryApplyOperation(firstCard);
 
         // Act: attempt another move after the budget has been exhausted.
-        bool accepted = session.TryApplyOperation(subtractThree);
+        bool accepted = session.TryApplyOperation(secondCard);
 
         // Assert: rejection preserves both the current number and the move count.
         Assert.False(accepted);
@@ -78,13 +161,17 @@ public class GameSessionTests
     {
         // Arrange: reach the target in two moves with a budget of three.
         // One move remains, so rejection must come from the target-reached guard.
-        var session = new GameSession(new Puzzle(8, 2), 3);
-        var subtractThree = new MathOperation(-3);
-        session.TryApplyOperation(subtractThree);
-        session.TryApplyOperation(subtractThree);
+        // Leave a third card available so this test specifically checks the target guard.
+        var firstCard = new MathOperation(-3);
+        var secondCard = new MathOperation(-3);
+        var thirdCard = new MathOperation(-3);
+        var session = new GameSession(new Puzzle(8, 2), 3,
+            new IMathOperation[] { firstCard, secondCard, thirdCard });
+        session.TryApplyOperation(firstCard);
+        session.TryApplyOperation(secondCard);
 
         // Act: attempt to continue playing after reaching the target.
-        bool accepted = session.TryApplyOperation(subtractThree);
+        bool accepted = session.TryApplyOperation(thirdCard);
 
         // Assert: the solved session rejects the move and preserves its state.
         Assert.False(accepted);
@@ -96,9 +183,11 @@ public class GameSessionTests
     public void TryApplyOperation_WithDifferentOperationTypes_ReachesTarget()
     {
         // Arrange: both concrete operation types are referenced through the same interface.
-        var session = new GameSession(new Puzzle(3, 16), 2);
         IMathOperation addFive = new MathOperation(5);
         IMathOperation multiplyByTwo = new MultiplyOperation(2);
+        // Both kinds of operation can be supplied together as the starting hand.
+        var session = new GameSession(new Puzzle(3, 16), 2,
+            new IMathOperation[] { addFive, multiplyByTwo });
 
         // Act: the session calls Apply through the contract: 3 + 5 = 8, then 8 * 2 = 16.
         bool firstAccepted = session.TryApplyOperation(addFive);

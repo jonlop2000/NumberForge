@@ -1,24 +1,26 @@
 using NumberForge.Core;
 
-var puzzle = new Puzzle(3, 16);
+var puzzle = new Puzzle(3, 12);
 
-var subtractThree = new MathOperation(-3);
-var session = new GameSession(puzzle, 2);
-
-List<IMathOperation> operations = new List<IMathOperation>
+List<IMathOperation> startingOperations = new List<IMathOperation>
 {
     new MathOperation(5),
-    subtractThree,
-    new MultiplyOperation(2)
+    new MultiplyOperation(2),
+    new MathOperation(-4)
 };
 
-while (!puzzle.IsTargetReached(session.CurrentNumber) && session.MovesUsed < session.MaxMoves) 
+var session = new GameSession(puzzle, 3, startingOperations);
+
+// A hand can run out before the move limit, so require a card before showing the menu.
+while (!puzzle.IsTargetReached(session.CurrentNumber)
+    && session.MovesUsed < session.MaxMoves
+    && session.AvailableOperations.Count > 0)
 {
     Console.WriteLine("Available operations:");
 
-    for (int i = 0; i < operations.Count; i++)
+    for (int i = 0; i < session.AvailableOperations.Count; i++)
     {
-        Console.WriteLine($"{i + 1}. {operations[i].Description}");
+        Console.WriteLine($"{i + 1}. {session.AvailableOperations[i].Description}");
     }
 
     Console.WriteLine("Enter a number, or q to quit:");
@@ -34,9 +36,9 @@ while (!puzzle.IsTargetReached(session.CurrentNumber) && session.MovesUsed < ses
     {
         Console.WriteLine($"Parsed choice: {choice}");
 
-        if (choice >= 1 && choice <= operations.Count)
+        if (choice >= 1 && choice <= session.AvailableOperations.Count)
         {
-            var selectedOperation = operations[choice - 1];
+            var selectedOperation = session.AvailableOperations[choice - 1];
 
             bool accepted = session.TryApplyOperation(selectedOperation);
 
@@ -59,6 +61,11 @@ while (!puzzle.IsTargetReached(session.CurrentNumber) && session.MovesUsed < ses
 if (puzzle.IsTargetReached(session.CurrentNumber))
 {
     Console.WriteLine("You've reached the target number!");
+}
+else if (session.AvailableOperations.Count == 0)
+{
+    // Explain why play stopped when there are no cards left to choose.
+    Console.WriteLine("You've run out of cards.");
 }
 else
 {
