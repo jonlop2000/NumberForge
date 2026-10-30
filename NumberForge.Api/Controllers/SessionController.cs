@@ -114,12 +114,23 @@ public class SessionController : ControllerBase
             }
         }
 
+        // Translate Core's move records into API contracts, preserving their original order.
+        var moveResponses = new List<MoveResponse>();
+        foreach (var move in session.History)
+        {
+            moveResponses.Add(new MoveResponse(
+                move.BeforeNumber,
+                move.OperationDescription,
+                move.AfterNumber));
+        }
+
         return new SessionResponse(
             sessionId,
             session.CurrentNumber,
             session.Puzzle.TargetNumber,
             session.MovesUsed,
             session.MaxMoves,
-            operationResponses);
+            operationResponses,
+            moveResponses);
     }
 }

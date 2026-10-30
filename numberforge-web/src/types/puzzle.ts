@@ -3,6 +3,13 @@ export type OperationResponse = {
     description: string
 }
 
+// Matches one completed move in the API's history JSON.
+export type MoveResponse = {
+    beforeNumber: number,
+    operationDescription: string,
+    afterNumber: number
+}
+
 export type PuzzleResponse = {
     startNumber: number,
     targetNumber: number,
@@ -18,5 +25,7 @@ export type SessionResponse = {
     targetNumber: number,
     movesUsed: number,
     maxMoves: number,
-    availableOperations: OperationResponse[]
+    availableOperations: OperationResponse[],
+    // The API supplies the completed moves in chronological order.
+    history: MoveResponse[]
 }

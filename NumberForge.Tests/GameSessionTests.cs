@@ -25,6 +25,7 @@ public class GameSessionTests
         Assert.Equal(8, session.CurrentNumber);
         Assert.Equal(0, session.MovesUsed);
         Assert.Equal(2, session.MaxMoves);
+        Assert.Empty(session.History);
 
         // Assert.Same checks that the session stores this exact puzzle object.
         Assert.Same(puzzle, session.Puzzle);
@@ -68,6 +69,55 @@ public class GameSessionTests
     }
 
     [Fact]
+    public void History_WhenCallerAttemptsToClear_RejectsChange()
+    {
+        var addFive = new MathOperation(5);
+        var session = new GameSession(new Puzzle(3, 12), 3, new IMathOperation[] { addFive });
+
+        // Capture the view before playing: it should show future entries without allowing edits.
+        var history = session.History;
+        Assert.True(session.TryApplyOperation(addFive));
+        var recordedMove = Assert.Single(history);
+        var collection = Assert.IsAssignableFrom<ICollection<MoveRecord>>(history);
+
+        Assert.Throws<NotSupportedException>(() => collection.Clear());
+        Assert.Same(recordedMove, Assert.Single(session.History));
+    }
+
+    [Fact]
+    public void History_WhenAnotherSessionMoves_RemainsEmpty()
+    {
+        // Sharing a starting hand must not share the players' move histories.
+        var addFive = new MathOperation(5);
+        var operations = new IMathOperation[] { addFive };
+        var firstSession = new GameSession(new Puzzle(3, 12), 3, operations);
+        var secondSession = new GameSession(new Puzzle(3, 12), 3, operations);
+
+        Assert.True(firstSession.TryApplyOperation(addFive));
+
+        Assert.Single(firstSession.History);
+        Assert.Empty(secondSession.History);
+        Assert.Equal(3, secondSession.CurrentNumber);
+        Assert.Equal(0, secondSession.MovesUsed);
+    }
+
+    [Fact]
+    public void TryApplyOperation_WhenCardIsNotInHand_RejectsMoveWithoutRecordingHistory()
+    {
+        var addFive = new MathOperation(5);
+        var otherCard = new MultiplyOperation(2);
+        var session = new GameSession(new Puzzle(3, 12), 3, new IMathOperation[] { addFive });
+
+        // A card that was never in this game must not create a history entry.
+        Assert.False(session.TryApplyOperation(otherCard));
+
+        Assert.Empty(session.History);
+        Assert.Equal(3, session.CurrentNumber);
+        Assert.Equal(0, session.MovesUsed);
+        Assert.Same(addFive, Assert.Single(session.AvailableOperations));
+    }
+
+    [Fact]
     public void TryApplyOperation_WhenSessionIsActive_AppliesMove()
     {
         // Arrange: start at 8 with a target of 2 and two available moves.
@@ -82,6 +132,12 @@ public class GameSessionTests
         Assert.True(accepted);
         Assert.Equal(5, session.CurrentNumber);
         Assert.Equal(1, session.MovesUsed);
+
+        // The saved entry describes the actual transition rather than just the final number.
+        var move = Assert.Single(session.History);
+        Assert.Equal(8, move.BeforeNumber);
+        Assert.Equal("Add -3", move.OperationDescription);
+        Assert.Equal(5, move.AfterNumber);
 
         // Consuming the card empties the available hand while preserving its original position.
         Assert.Empty(session.AvailableOperations);
@@ -105,6 +161,7 @@ public class GameSessionTests
         Assert.Equal(1, session.MovesUsed);
         Assert.Equal(2, session.AvailableOperations.Count);
         Assert.DoesNotContain(addFive, session.AvailableOperations);
+        var recordedMove = Assert.Single(session.History);
 
         // Act: try the same card again while the session is still active.
         bool accepted = session.TryApplyOperation(addFive);
@@ -115,6 +172,7 @@ public class GameSessionTests
         Assert.Equal(1, session.MovesUsed);
         Assert.Equal(2, session.AvailableOperations.Count);
         Assert.Equal(new IMathOperation[] { multiplyByTwo, subtractFour }, session.AvailableOperations);
+        Assert.Same(recordedMove, Assert.Single(session.History));
     }
 
     [Fact]
@@ -134,6 +192,9 @@ public class GameSessionTests
         Assert.True(accepted);
         Assert.Equal(2, session.CurrentNumber);
         Assert.Equal(2, session.MovesUsed);
+        Assert.Equal(2, session.History.Count);
+        Assert.Equal(5, session.History[1].BeforeNumber);
+        Assert.Equal(2, session.History[1].AfterNumber);
     }
 
     [Fact]
@@ -146,6 +207,7 @@ public class GameSessionTests
         var secondCard = new MathOperation(-3);
         var session = new GameSession(new Puzzle(8, 2), 1, new IMathOperation[] { firstCard, secondCard });
         session.TryApplyOperation(firstCard);
+        var historyBeforeRejection = session.History.ToArray();
 
         // Act: attempt another move after the budget has been exhausted.
         bool accepted = session.TryApplyOperation(secondCard);
@@ -154,6 +216,7 @@ public class GameSessionTests
         Assert.False(accepted);
         Assert.Equal(5, session.CurrentNumber);
         Assert.Equal(1, session.MovesUsed);
+        Assert.Equal(historyBeforeRejection, session.History);
     }
 
     [Fact]
@@ -169,6 +232,7 @@ public class GameSessionTests
             new IMathOperation[] { firstCard, secondCard, thirdCard });
         session.TryApplyOperation(firstCard);
         session.TryApplyOperation(secondCard);
+        var historyBeforeRejection = session.History.ToArray();
 
         // Act: attempt to continue playing after reaching the target.
         bool accepted = session.TryApplyOperation(thirdCard);
@@ -177,6 +241,7 @@ public class GameSessionTests
         Assert.False(accepted);
         Assert.Equal(2, session.CurrentNumber);
         Assert.Equal(2, session.MovesUsed);
+        Assert.Equal(historyBeforeRejection, session.History);
     }
 
     [Fact]
@@ -198,5 +263,20 @@ public class GameSessionTests
         Assert.True(secondAccepted);
         Assert.Equal(16, session.CurrentNumber);
         Assert.Equal(2, session.MovesUsed);
+
+        // Assert.Collection checks both the number of entries and their chronological order.
+        Assert.Collection(session.History,
+            move =>
+            {
+                Assert.Equal(3, move.BeforeNumber);
+                Assert.Equal("Add 5", move.OperationDescription);
+                Assert.Equal(8, move.AfterNumber);
+            },
+            move =>
+            {
+                Assert.Equal(8, move.BeforeNumber);
+                Assert.Equal("Multiply by 2", move.OperationDescription);
+                Assert.Equal(16, move.AfterNumber);
+            });
     }
 }

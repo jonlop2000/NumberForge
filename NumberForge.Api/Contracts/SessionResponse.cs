@@ -8,7 +8,8 @@ public class SessionResponse
         int targetNumber,
         int movesUsed,
         int maxMoves,
-        IReadOnlyList<OperationResponse> availableOperations)
+        IReadOnlyList<OperationResponse> availableOperations,
+        IReadOnlyList<MoveResponse> history)
     {
         SessionId = sessionId;
         CurrentNumber = currentNumber;
@@ -16,6 +17,9 @@ public class SessionResponse
         MovesUsed = movesUsed;
         MaxMoves = maxMoves;
         AvailableOperations = new List<OperationResponse>(availableOperations).AsReadOnly();
+
+        // Copy the list so later changes cannot rewrite this response's history snapshot.
+        History = new List<MoveResponse>(history).AsReadOnly();
     }
 
     public Guid SessionId { get; }
@@ -24,4 +28,5 @@ public class SessionResponse
     public int MovesUsed { get; }
     public int MaxMoves { get; }
     public IReadOnlyList<OperationResponse> AvailableOperations { get; }
+    public IReadOnlyList<MoveResponse> History { get; }
 }

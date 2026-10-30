@@ -1,12 +1,26 @@
 import { useEffect, useRef, useState } from 'react'
+import MoveHistory from './components/MoveHistory'
+import OperationCards from './components/OperationCards'
 import type { PuzzleResponse, SessionResponse } from './types/puzzle'
 import './App.css'
+
+const savedSessionKey = 'numberforge.sessionId'
+
+function clearSavedSession() {
+  try {
+    localStorage.removeItem(savedSessionKey)
+  } catch {
+  }
+}
 
 function App() {
   const [puzzle, setPuzzle] = useState<PuzzleResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const [session, setSession] = useState<SessionResponse | null>(null)
+  const [isRestoring, setIsRestoring] = useState(true)
+  const [restoreError, setRestoreError] = useState<string | null>(null)
+  const [restoreAttempt, setRestoreAttempt] = useState(0)
   const [isStarting, setIsStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
 
@@ -16,6 +30,7 @@ function App() {
 
   const startInFlight = useRef(false)
   const moveInFlight = useRef(false)
+  const restoreInFlight = useRef(true)
 
   const hasWon = session !== null && session.currentNumber === session.targetNumber
   const isFinished = session !== null && (
@@ -24,8 +39,10 @@ function App() {
 
   useEffect(() => {
     const controller = new AbortController()
+    restoreInFlight.current = true
 
     async function loadPuzzle() {
+      setError(null)
       try {
         const response = await fetch('/api/puzzles/demo', {
           signal: controller.signal,
@@ -48,14 +65,72 @@ function App() {
       }
     }
 
+    async function restoreSavedSession() {
+      try {
+        let savedSessionId: string | null = null
+        try {
+          savedSessionId = localStorage.getItem(savedSessionKey)
+        } catch {
+          // A browser that blocks storage can still load the preview and start a game.
+        }
+
+        if (!savedSessionId) {
+          return
+        }
+
+        // Restore with GET: loading or retrying the page must never create a new game.
+        const response = await fetch(`/api/sessions/${encodeURIComponent(savedSessionId)}`, {
+          signal: controller.signal,
+        })
+
+        if (controller.signal.aborted) {
+          return
+        }
+        if (response.status === 404) {
+          clearSavedSession()
+          setMoveError('This game is no longer available. Start a new game.')
+          return
+        }
+        if (!response.ok) {
+          throw new Error('Failed to restore game')
+        }
+
+        const restoredSession: SessionResponse = await response.json()
+        if (!controller.signal.aborted) {
+          setSession(restoredSession)
+        }
+      } catch {
+        if (!controller.signal.aborted) {
+          setRestoreError('Unable to restore your saved game. Please try again.')
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          restoreInFlight.current = false
+          setIsRestoring(false)
+        }
+      }
+    }
+
     void loadPuzzle()
+    void restoreSavedSession()
     return () => controller.abort()
-  }, [])
+  }, [restoreAttempt])
+
+  function retryRestoration() {
+    if (restoreInFlight.current) {
+      return
+    }
+
+    restoreInFlight.current = true
+    setIsRestoring(true)
+    setRestoreError(null)
+    setRestoreAttempt(attempt => attempt + 1)
+  }
 
   async function startGame() {
-    // Allow the first game and replays after a win or loss, while protecting an active game.
-    // The refs also block rapid clicks before React renders the disabled button.
-    if (startInFlight.current || moveInFlight.current || (session !== null && !isFinished)) {
+
+    if (restoreInFlight.current || restoreError !== null || startInFlight.current
+      || moveInFlight.current || (session !== null && !isFinished)) {
       return
     }
 
@@ -74,6 +149,13 @@ function App() {
       const createdSession: SessionResponse = await response.json()
 
       setSession(createdSession)
+
+      try {
+        // Save the ID after creation succeeds; Play again replaces it with the new session's ID.
+        localStorage.setItem(savedSessionKey, createdSession.sessionId)
+      } catch {
+        // Browser settings can block storage. The successfully created game is still playable.
+      }
     } catch {
       setStartError('Unable to start the game. Please try again.')
     } finally {
@@ -83,6 +165,7 @@ function App() {
   }
 
   function handleMissingSession() {
+    clearSavedSession()
     setSession(null)
     setNeedsRefresh(false)
     setMoveError('This game is no longer available. Start a new game.')
@@ -167,14 +250,19 @@ function App() {
   }
 
   const displayedOperations = session?.availableOperations ?? puzzle?.operations ?? []
-  const hasDisplayData = session !== null || (puzzle !== null && error === null)
+  const hasDisplayData = !isRestoring && restoreError === null
+    && (session !== null || (puzzle !== null && error === null))
 
   return (
     <main id="center">
       <h1>Number Forge</h1>
 
       {/* Once a game starts, its response becomes the source of the displayed progress. */}
-      {session !== null ? (
+      {isRestoring ? (
+        <p role="status">Checking for a saved game…</p>
+      ) : restoreError !== null ? (
+        <p className="game-feedback" role="alert">{restoreError}</p>
+      ) : session !== null ? (
         <>
           {/* A final move can both use the last card and win, so show the win message first. */}
           <p role="status">
@@ -200,28 +288,25 @@ function App() {
         </>
       )}
 
+      {restoreError !== null && (
+        <button type="button" className="refresh-game" onClick={retryRestoration}>
+          Retry restore
+        </button>
+      )}
+
       {hasDisplayData && (
-        <section aria-labelledby="operations-heading">
-          <h2 id="operations-heading">Available operations</h2>
-          <ul className="operation-list" aria-busy={isMoving}>
-            {/* The preview and session both provide cards with stable IDs. */}
-            {displayedOperations.map((operation) => (
-              <li key={operation.id}>
-                {session !== null ? (
-                  <button
-                    type="button"
-                    className="operation-card"
-                    onClick={() => applyMove(operation.id)}
-                    disabled={isMoving || isFinished || needsRefresh}
-                  >
-                    {operation.description}
-                  </button>
-                ) : operation.description}
-              </li>
-            ))}
-          </ul>
-          {session !== null && displayedOperations.length === 0 && <p>No cards remaining.</p>}
-        </section>
+        <OperationCards
+          operations={displayedOperations}
+          disabled={isMoving || isFinished || needsRefresh}
+          isBusy={isMoving}
+          // Passing a callback enables card buttons; leaving it undefined displays the preview.
+          onSelect={session !== null ? applyMove : undefined}
+        />
+      )}
+
+      {/* Pass the current snapshot to the display component after moves, refreshes, and replays. */}
+      {session !== null && (
+        <MoveHistory sessionId={session.sessionId} history={session.history} />
       )}
 
       {/* Keep errors visible even if a missing session returns the page to its preview. */}
@@ -238,12 +323,12 @@ function App() {
       )}
 
       {/* Reuse the start handler for a finished game; an active game has no restart button. */}
-      {((session === null && puzzle !== null && error === null) || isFinished) && (
+      {((session === null && puzzle !== null && error === null && restoreError === null) || isFinished) && (
         <button
           type="button"
           className="start-game"
           onClick={startGame}
-          disabled={isStarting || isMoving}
+          disabled={isStarting || isMoving || isRestoring}
           aria-busy={isStarting}
         >
           {isStarting ? 'Starting…' : isFinished ? 'Play again' : 'Start game'}

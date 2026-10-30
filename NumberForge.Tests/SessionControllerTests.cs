@@ -26,11 +26,19 @@ public class SessionControllerTests
         var finalMove = MoveState(controller.ApplyMove(created.SessionId, new ApplyMoveRequest(3)));
         AssertState(finalMove, 12, 3);
         Assert.Equal(finalMove.TargetNumber, finalMove.CurrentNumber);
-        AssertState(MoveState(controller.GetById(created.SessionId)), 12, 3);
+        var retrieved = MoveState(controller.GetById(created.SessionId));
+        AssertState(retrieved, 12, 3);
 
         // Later moves must not change DTOs that were already returned to a client.
         AssertState(created, 3, 0, 1, 2, 3);
         AssertState(firstMove, 8, 1, 2, 3);
+
+        // History is mapped in order, and earlier responses retain only the moves they captured.
+        AssertHistory(created);
+        AssertHistory(firstMove, (3, "Add 5", 8));
+        AssertHistory(secondMove, (3, "Add 5", 8), (8, "Multiply by 2", 16));
+        AssertHistory(finalMove, (3, "Add 5", 8), (8, "Multiply by 2", 16), (16, "Add -4", 12));
+        AssertHistory(retrieved, (3, "Add 5", 8), (8, "Multiply by 2", 16), (16, "Add -4", 12));
     }
 
     [Fact]
@@ -177,6 +185,15 @@ public class SessionControllerTests
         Assert.Equal(number, response.CurrentNumber);
         Assert.Equal(moves, response.MovesUsed);
         Assert.Equal(cardIds, response.AvailableOperations.Select(card => card.Id));
+        // Rejected and overlapping requests must also leave exactly one entry per accepted move.
+        Assert.Equal(moves, response.History.Count);
+    }
+
+    private static void AssertHistory(SessionResponse response,
+        params (int BeforeNumber, string OperationDescription, int AfterNumber)[] expected)
+    {
+        Assert.Equal(expected, response.History.Select(move =>
+            (move.BeforeNumber, move.OperationDescription, move.AfterNumber)));
     }
 
     private static void AssertProblem(IActionResult result, int statusCode)
