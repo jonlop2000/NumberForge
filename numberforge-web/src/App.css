@@ -1,7 +1,9 @@
 /* Keep game controls consistent with the existing accent colors. */
 .start-game,
 .operation-card,
-.refresh-game {
+.refresh-game,
+.choose-puzzle,
+.new-challenge {
   font: inherit;
   padding: 8px 16px;
   color: var(--accent);
@@ -18,14 +20,19 @@
 
 /* Cards can also be disabled because a game ended or needs a refresh. */
 .operation-card:disabled,
-.refresh-game:disabled {
+.refresh-game:disabled,
+.choose-puzzle:disabled,
+.new-challenge:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
 
 .start-game:focus-visible,
 .operation-card:focus-visible,
-.refresh-game:focus-visible {
+.refresh-game:focus-visible,
+.choose-puzzle:focus-visible,
+.new-challenge:focus-visible,
+.puzzle-picker select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
@@ -42,6 +49,57 @@
 
 .game-feedback {
   max-width: 48ch;
+}
+
+.game-result {
+  color: var(--text-h);
+  font-weight: 600;
+}
+
+.route-collection {
+  width: min(100%, 48ch);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.route-discovery {
+  color: var(--accent);
+}
+
+.collection-badge {
+  padding: 8px 12px;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: 6px;
+  font-weight: 600;
+}
+
+.route-collection summary {
+  cursor: pointer;
+}
+
+.saved-routes {
+  text-align: left;
+  display: grid;
+  gap: 12px;
+  padding-left: 24px;
+}
+
+.puzzle-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(100%, 20rem);
+}
+
+.puzzle-picker select {
+  font: inherit;
+  padding: 8px 12px;
+  color: var(--text-h);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
 
 .counter {

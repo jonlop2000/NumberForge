@@ -6,7 +6,8 @@ public class MathOperation : IMathOperation
     {
         Amount = amount;
 
-        Description = $"Add {amount}";
+        // Card text is also part of a puzzle's stable identity, so server locale must not change it.
+        Description = FormattableString.Invariant($"Add {amount}");
     }
 
     public int Amount { get; }
@@ -15,6 +16,6 @@ public class MathOperation : IMathOperation
 
     public int Apply(int input)
     {
-        return input + Amount;
+        return checked(input + Amount);
     }
 }

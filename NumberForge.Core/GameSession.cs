@@ -3,23 +3,39 @@ namespace NumberForge.Core;
 public class GameSession
 {
     private readonly List<IMathOperation> _availableOperations;
+    private readonly List<IMathOperation> _startingOperations;
 
-    // Each session owns its history. readonly prevents replacing the list; we can still add moves.
     private readonly List<MoveRecord> _history = new List<MoveRecord>();
 
-    public GameSession(Puzzle puzzle, int maxMoves, IEnumerable<IMathOperation> operations)
+    // Reuse a catalog definition while the existing constructor gives this attempt its own hand.
+    public GameSession(PuzzleDefinition definition)
+        : this((definition ?? throw new ArgumentNullException(nameof(definition))).Puzzle,
+            definition.MaxMoves, definition.Operations, definition.Charm)
     {
+        Definition = definition;
+    }
+
+    public GameSession(Puzzle puzzle, int maxMoves, IEnumerable<IMathOperation> operations,
+        CharmType charm = CharmType.None)
+    {
+        ArgumentNullException.ThrowIfNull(puzzle);
+        ArgumentNullException.ThrowIfNull(operations);
+        ArgumentOutOfRangeException.ThrowIfNegative(maxMoves);
+        GameRules.ValidateCharm(charm);
+
         Puzzle = puzzle;
         MaxMoves = maxMoves;
         CurrentNumber = puzzle.StartNumber;
 
-        _availableOperations = new List<IMathOperation>(operations);
+        Charm = charm;
 
-        // Keep the original hand separate; using a card only changes the available hand.
-        StartingOperations = new List<IMathOperation>(_availableOperations).AsReadOnly();
+        _availableOperations = new List<IMathOperation>(operations);
+        GameRules.ValidateHand(_availableOperations);
+
+        _startingOperations = new List<IMathOperation>(_availableOperations);
+        StartingOperations = _startingOperations.AsReadOnly();
         AvailableOperations = _availableOperations.AsReadOnly();
 
-        // Give callers a view that updates with the list but rejects changes from outside this class.
         History = _history.AsReadOnly();
     }
 
@@ -28,33 +44,74 @@ public class GameSession
     public Puzzle Puzzle { get; }
     public int MaxMoves { get; }
 
-    // This snapshot preserves the original card order after cards have been used.
+    // Catalog games retain their identity for page refreshes and replay.
+    // Standalone games, such as the console's custom puzzle, can omit a definition.
+    public PuzzleDefinition? Definition { get; }
+
+    public CharmType Charm { get; }
+
+    public bool EchoUsed { get; private set; }
+
     public IReadOnlyList<IMathOperation> StartingOperations { get; }
     public IReadOnlyList<IMathOperation> AvailableOperations { get; }
 
-    // Entries stay in the order the accepted moves happened.
     public IReadOnlyList<MoveRecord> History { get; }
+
+    // All interfaces use these same rules to decide when an attempt has ended.
+    public bool IsFinished => GameRules.IsFinished(Puzzle, CurrentNumber, MovesUsed, MaxMoves, _availableOperations.Count);
+
+    // Only a win with a known minimum can be graded. Active games and losses have no grade.
+    public bool? IsPerfect => Definition is not null && Puzzle.IsTargetReached(CurrentNumber)
+        ? MovesUsed == Definition.MinimumMoves
+        : null;
+
+    // int? lets us return null when this card cannot currently be played.
+    public int? PreviewOperation(IMathOperation operation)
+    {
+        if (!CanApplyOperation(operation))
+        {
+            return null;
+        }
+
+        // Reading the calculated result leaves the number, cards, history, and charm untouched.
+        return GameRules.TryCalculate(CurrentNumber, operation, Charm, EchoUsed, out int result, out _)
+            ? result : null;
+    }
 
     public bool TryApplyOperation(IMathOperation operation)
     {
-        if (!_availableOperations.Contains(operation))
+        if (!CanApplyOperation(operation))
         {
             return false;
         }
 
-        if (MovesUsed >= MaxMoves || Puzzle.IsTargetReached(CurrentNumber))
-        {
-            return false;
-        }
-
-        // Save the previous value before replacing it, so history describes both sides of the move.
         int beforeNumber = CurrentNumber;
-        CurrentNumber = operation.Apply(CurrentNumber);
+        string operationDescription = operation.Description;
+        if (!GameRules.TryCalculate(CurrentNumber, operation, Charm, EchoUsed, out int afterNumber, out bool usesEcho))
+        {
+            return false;
+        }
 
-        // Rejected moves returned above. Record a move only after its calculation succeeds.
-        _history.Add(new MoveRecord(beforeNumber, operation.Description, CurrentNumber));
+        // A real move commits the calculation and spends Echo if this card activated it.
+        CurrentNumber = afterNumber;
+        if (usesEcho)
+        {
+            EchoUsed = true;
+            operationDescription += " (Echo ×2)";
+        }
+
+        // Record the original card ID, not its current position in the shrinking hand.
+        int operationId = _startingOperations.FindIndex(card => ReferenceEquals(card, operation)) + 1;
+        _history.Add(new MoveRecord(operationId, beforeNumber, operationDescription, CurrentNumber));
         MovesUsed++;
-        _availableOperations.Remove(operation);
+        _availableOperations.RemoveAt(_availableOperations.FindIndex(card => ReferenceEquals(card, operation)));
         return true;
+    }
+
+    private bool CanApplyOperation(IMathOperation operation)
+    {
+        // Previewing and playing agree on which cards are still legal to use.
+        return _availableOperations.Any(card => ReferenceEquals(card, operation))
+            && !IsFinished;
     }
 }

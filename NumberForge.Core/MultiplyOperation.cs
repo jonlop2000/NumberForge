@@ -6,7 +6,7 @@ public class MultiplyOperation : IMathOperation
     {
         Factor = factor;
 
-        Description = $"Multiply by {factor}";
+        Description = FormattableString.Invariant($"Multiply by {factor}");
     }
 
     public int Factor { get; }
@@ -15,6 +15,6 @@ public class MultiplyOperation : IMathOperation
 
     public int Apply(int input)
     {
-        return input * Factor;
+        return checked(input * Factor);
     }
 }

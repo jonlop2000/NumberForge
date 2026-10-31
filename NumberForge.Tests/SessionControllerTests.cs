@@ -1,7 +1,9 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using NumberForge.Api.Contracts;
 using NumberForge.Api.Controllers;
+using NumberForge.Api.Persistence;
 using NumberForge.Api.Services;
 using NumberForge.Core;
 
@@ -9,44 +11,113 @@ namespace NumberForge.Tests;
 
 public class SessionControllerTests
 {
-    [Fact]
-    public void ApplyMove_WithOriginalCardIds_ReachesTargetAndPreservesResponseSnapshots()
+    [Theory]
+    [InlineData(1, 2, 7, 3, "Add 2 (Echo ×2)", "Multiply by 2")]
+    [InlineData(2, 3, 6, 1, "Multiply by 2", "Add 4 (Echo ×2)")]
+    public async Task ApplyMove_WithEitherDemoRoute_ReachesTargetAndPreservesResponseSnapshots(
+        int firstCardId, int secondCardId, int intermediateNumber, int unusedCardId,
+        string firstDescription, string secondDescription)
     {
         var store = new GameSessionStore();
-        var controller = new SessionController(store);
-        var created = CreatedState(controller.Create());
+        var controller = new SessionController(store, new PuzzleCatalog()).ForPlayer();
+        var created = CreatedState(await controller.Create());
+
+        // The preview and newly created game must agree on numbers, budget, and card IDs.
+        var previewResult = Assert.IsType<OkObjectResult>(await new PuzzleController(new PuzzleCatalog(), new PuzzleResponseMapper(new GameSessionStore())).ForPlayer().GetById("demo"));
+        var preview = Assert.IsType<PuzzleResponse>(previewResult.Value);
+        Assert.Equal(3, created.CurrentNumber);
+        Assert.Equal(14, created.TargetNumber);
+        Assert.Equal(2, created.MaxMoves);
+        Assert.Equal(new[] { "Add 2", "Multiply by 2", "Add 4" },
+            created.AvailableOperations.Select(card => card.Description));
+        Assert.Equal(created.CurrentNumber, preview.StartNumber);
+        Assert.Equal(created.TargetNumber, preview.TargetNumber);
+        Assert.Equal(created.MaxMoves, preview.MaxMoves);
+        Assert.Equal(created.AvailableOperations.Select(card => (card.Id, card.Description)),
+            preview.Operations.Select(card => (card.Id, card.Description)));
+        Assert.Equal("Echo", Assert.IsType<CharmResponse>(created.Charm).Name);
+        Assert.False(created.Charm.IsUsed);
+
+        // Predicted results stay hidden both before and during play, so planning remains the player's task.
+        Assert.All(preview.Operations, card => Assert.Null(card.PreviewNumber));
+        Assert.All(created.AvailableOperations, card => Assert.Null(card.PreviewNumber));
 
         // IDs stay attached to the original cards as the available hand shrinks.
-        var firstMove = MoveState(controller.ApplyMove(created.SessionId, new ApplyMoveRequest(1)));
-        AssertState(firstMove, 8, 1, 2, 3);
+        var remainingAfterFirstMove = new[] { 1, 2, 3 }.Where(id => id != firstCardId).ToArray();
+        var firstMove = MoveState(await controller.ApplyMove(created.SessionId, new ApplyMoveRequest(firstCardId)));
+        AssertState(firstMove, intermediateNumber, 1, remainingAfterFirstMove);
+        Assert.All(firstMove.AvailableOperations, card => Assert.Null(card.PreviewNumber));
 
-        var secondMove = MoveState(controller.ApplyMove(created.SessionId, new ApplyMoveRequest(2)));
-        AssertState(secondMove, 16, 2, 3);
-
-        var finalMove = MoveState(controller.ApplyMove(created.SessionId, new ApplyMoveRequest(3)));
-        AssertState(finalMove, 12, 3);
+        var finalMove = MoveState(await controller.ApplyMove(created.SessionId, new ApplyMoveRequest(secondCardId)));
+        AssertState(finalMove, 14, 2, unusedCardId);
+        Assert.All(finalMove.AvailableOperations, card => Assert.Null(card.PreviewNumber));
         Assert.Equal(finalMove.TargetNumber, finalMove.CurrentNumber);
-        var retrieved = MoveState(controller.GetById(created.SessionId));
-        AssertState(retrieved, 12, 3);
+        var retrieved = MoveState(await controller.GetById(created.SessionId));
+        AssertState(retrieved, 14, 2, unusedCardId);
+        Assert.All(retrieved.AvailableOperations, card => Assert.Null(card.PreviewNumber));
+        Assert.True(Assert.IsType<CharmResponse>(finalMove.Charm).IsUsed);
+        Assert.True(Assert.IsType<CharmResponse>(retrieved.Charm).IsUsed);
 
         // Later moves must not change DTOs that were already returned to a client.
         AssertState(created, 3, 0, 1, 2, 3);
-        AssertState(firstMove, 8, 1, 2, 3);
+        AssertState(firstMove, intermediateNumber, 1, remainingAfterFirstMove);
+        Assert.False(created.Charm.IsUsed);
+        Assert.Equal(firstCardId == 1, Assert.IsType<CharmResponse>(firstMove.Charm).IsUsed);
+        Assert.All(created.AvailableOperations, card => Assert.Null(card.PreviewNumber));
 
         // History is mapped in order, and earlier responses retain only the moves they captured.
         AssertHistory(created);
-        AssertHistory(firstMove, (3, "Add 5", 8));
-        AssertHistory(secondMove, (3, "Add 5", 8), (8, "Multiply by 2", 16));
-        AssertHistory(finalMove, (3, "Add 5", 8), (8, "Multiply by 2", 16), (16, "Add -4", 12));
-        AssertHistory(retrieved, (3, "Add 5", 8), (8, "Multiply by 2", 16), (16, "Add -4", 12));
+        AssertHistory(firstMove, (3, firstDescription, intermediateNumber));
+        AssertHistory(finalMove, (3, firstDescription, intermediateNumber), (intermediateNumber, secondDescription, 14));
+        AssertHistory(retrieved, (3, firstDescription, intermediateNumber), (intermediateNumber, secondDescription, 14));
     }
 
     [Fact]
-    public void ApplyMove_WhenSessionDoesNotExist_ReturnsNotFound()
+    public async Task GetByIdAndApplyMove_WithEcho_ReportCharmStateAndPreserveEarlierSnapshots()
     {
-        var controller = new SessionController(new GameSessionStore());
+        var store = new GameSessionStore();
+        var controller = new SessionController(store, new PuzzleCatalog()).ForPlayer();
+        var session = new GameSession(new Puzzle(3, 14), 2,
+            new IMathOperation[] { new MathOperation(2), new MultiplyOperation(2), new MathOperation(4) },
+            CharmType.Echo);
+        Guid id = (await store.AddAsync(session, TestPlayer.Id))!.Value;
 
-        var result = controller.ApplyMove(Guid.Empty, new ApplyMoveRequest(1));
+        // Reading a new Echo game supplies the rule and its unused state.
+        var beforeMove = MoveState(await controller.GetById(id));
+        var readyCharm = Assert.IsType<CharmResponse>(beforeMove.Charm);
+        Assert.Equal("Echo", readyCharm.Name);
+        Assert.Equal("Your first positive addition activates twice.", readyCharm.Description);
+        Assert.False(readyCharm.IsUsed);
+        Assert.All(beforeMove.AvailableOperations, card => Assert.Null(card.PreviewNumber));
+
+        var afterMove = MoveState(await controller.ApplyMove(id, new ApplyMoveRequest(1)));
+
+        AssertState(afterMove, 7, 1, 2, 3);
+        Assert.True(Assert.IsType<CharmResponse>(afterMove.Charm).IsUsed);
+        AssertHistory(afterMove, (3, "Add 2 (Echo ×2)", 7));
+        Assert.All(afterMove.AvailableOperations, card => Assert.Null(card.PreviewNumber));
+
+        // A later GET includes the spent charm, while the earlier DTO stays unused.
+        var retrieved = MoveState(await controller.GetById(id));
+        Assert.True(Assert.IsType<CharmResponse>(retrieved.Charm).IsUsed);
+        AssertState(retrieved, 7, 1, 2, 3);
+        Assert.All(retrieved.AvailableOperations, card => Assert.Null(card.PreviewNumber));
+        Assert.False(readyCharm.IsUsed);
+        AssertState(beforeMove, 3, 0, 1, 2, 3);
+        Assert.All(beforeMove.AvailableOperations, card => Assert.Null(card.PreviewNumber));
+
+        var finalMove = MoveState(await controller.ApplyMove(id, new ApplyMoveRequest(2)));
+        AssertState(finalMove, 14, 2, 3);
+        Assert.True(Assert.IsType<CharmResponse>(finalMove.Charm).IsUsed);
+        Assert.False(readyCharm.IsUsed);
+    }
+
+    [Fact]
+    public async Task ApplyMove_WhenSessionDoesNotExist_ReturnsNotFound()
+    {
+        var controller = new SessionController(new GameSessionStore(), new PuzzleCatalog()).ForPlayer();
+
+        var result = await controller.ApplyMove(Guid.Empty, new ApplyMoveRequest(1));
 
         Assert.IsType<NotFoundResult>(result);
     }
@@ -56,107 +127,123 @@ public class SessionControllerTests
     [InlineData(0)]
     [InlineData(4)]
     [InlineData(int.MaxValue)]
-    public void ApplyMove_WhenCardIdIsInvalid_RejectsWithoutChangingState(int operationId)
+    public async Task ApplyMove_WhenCardIdIsInvalid_RejectsWithoutChangingState(int operationId)
     {
-        var controller = new SessionController(new GameSessionStore());
-        var created = CreatedState(controller.Create());
+        var controller = new SessionController(new GameSessionStore(), new PuzzleCatalog()).ForPlayer();
+        var created = CreatedState(await controller.Create());
 
-        var result = controller.ApplyMove(created.SessionId, new ApplyMoveRequest(operationId));
+        var result = await controller.ApplyMove(created.SessionId, new ApplyMoveRequest(operationId));
 
         AssertProblem(result, StatusCodes.Status400BadRequest);
-        AssertState(MoveState(controller.GetById(created.SessionId)), 3, 0, 1, 2, 3);
+        AssertState(MoveState(await controller.GetById(created.SessionId)), 3, 0, 1, 2, 3);
     }
 
     [Fact]
-    public void ApplyMove_WhenCardWasAlreadyUsed_ReturnsConflictWithoutChangingState()
+    public async Task ApplyMove_WhenCardWasAlreadyUsed_ReturnsConflictWithoutChangingState()
     {
-        var controller = new SessionController(new GameSessionStore());
-        var created = CreatedState(controller.Create());
-        MoveState(controller.ApplyMove(created.SessionId, new ApplyMoveRequest(1)));
+        var controller = new SessionController(new GameSessionStore(), new PuzzleCatalog()).ForPlayer();
+        var created = CreatedState(await controller.Create());
+        MoveState(await controller.ApplyMove(created.SessionId, new ApplyMoveRequest(1)));
 
-        var result = controller.ApplyMove(created.SessionId, new ApplyMoveRequest(1));
+        var result = await controller.ApplyMove(created.SessionId, new ApplyMoveRequest(1));
 
         AssertProblem(result, StatusCodes.Status409Conflict);
-        AssertState(MoveState(controller.GetById(created.SessionId)), 8, 1, 2, 3);
+        AssertState(MoveState(await controller.GetById(created.SessionId)), 7, 1, 2, 3);
     }
 
     [Fact]
-    public void ApplyMove_WhenTargetWasReached_RejectsAnUnusedCard()
+    public async Task ApplyMove_WhenTargetWasReached_RejectsAnUnusedCard()
     {
         var store = new GameSessionStore();
-        var controller = new SessionController(store);
-        var game = new GameSession(new Puzzle(3, 8), 3, DemoOperations());
-        Guid id = store.Add(game);
-        MoveState(controller.ApplyMove(id, new ApplyMoveRequest(1)));
+        var controller = new SessionController(store, new PuzzleCatalog()).ForPlayer();
+        var game = new GameSession(new Puzzle(3, 8), 3, GuardTestOperations());
+        Guid id = (await store.AddAsync(game, TestPlayer.Id))!.Value;
+        Assert.Null(MoveState(await controller.GetById(id)).Charm);
+        MoveState(await controller.ApplyMove(id, new ApplyMoveRequest(1)));
 
         // Card 2 is unused and moves remain, so Core must reject because the target was reached.
-        var result = controller.ApplyMove(id, new ApplyMoveRequest(2));
+        var result = await controller.ApplyMove(id, new ApplyMoveRequest(2));
 
         AssertProblem(result, StatusCodes.Status409Conflict);
-        AssertState(MoveState(controller.GetById(id)), 8, 1, 2, 3);
+        var retrieved = MoveState(await controller.GetById(id));
+        AssertState(retrieved, 8, 1, 2, 3);
+        Assert.Null(retrieved.Charm);
+        Assert.All(retrieved.AvailableOperations, card => Assert.Null(card.PreviewNumber));
     }
 
     [Fact]
-    public void ApplyMove_WhenMoveLimitWasReached_RejectsAnUnusedCard()
+    public async Task ApplyMove_WhenMoveLimitWasReached_RejectsAnUnusedCard()
     {
         var store = new GameSessionStore();
-        var controller = new SessionController(store);
-        var game = new GameSession(new Puzzle(3, 12), 1, DemoOperations());
-        Guid id = store.Add(game);
-        MoveState(controller.ApplyMove(id, new ApplyMoveRequest(1)));
+        var controller = new SessionController(store, new PuzzleCatalog()).ForPlayer();
+        var game = new GameSession(new Puzzle(3, 12), 1, GuardTestOperations());
+        Guid id = (await store.AddAsync(game, TestPlayer.Id))!.Value;
+        MoveState(await controller.ApplyMove(id, new ApplyMoveRequest(1)));
 
         // The target is not reached and card 2 remains, isolating the move-limit rule.
-        var result = controller.ApplyMove(id, new ApplyMoveRequest(2));
+        var result = await controller.ApplyMove(id, new ApplyMoveRequest(2));
 
         AssertProblem(result, StatusCodes.Status409Conflict);
-        AssertState(MoveState(controller.GetById(id)), 8, 1, 2, 3);
+        var retrieved = MoveState(await controller.GetById(id));
+        AssertState(retrieved, 8, 1, 2, 3);
+        Assert.All(retrieved.AvailableOperations, card => Assert.Null(card.PreviewNumber));
     }
 
-    [Fact]
-    public async Task ApplyMove_WithOverlappingRequests_AppliesCardOnceAndSynchronizesReads()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ApplyMove_WithOverlappingApiInstances_CommitsOnceAndKeepsReadsConsistent(bool sameRequestId)
     {
-        var store = new GameSessionStore();
-        var controller = new SessionController(store);
-        using var operation = new PausingOperation();
-        Guid id = store.Add(new GameSession(new Puzzle(3, 99), 2, new IMathOperation[] { operation }));
-        var otherGame = CreatedState(controller.Create());
+        var repository = new PausingRepository();
+        var limits = Options.Create(new SessionLimits());
+        var firstStore = new GameSessionStore(TimeProvider.System, repository, limits);
+        var secondStore = new GameSessionStore(TimeProvider.System, repository, limits);
+        var firstController = new SessionController(firstStore, new PuzzleCatalog()).ForPlayer();
+        var secondController = new SessionController(secondStore, new PuzzleCatalog()).ForPlayer();
+        var independentController = new SessionController(
+            new GameSessionStore(TimeProvider.System, repository, limits), new PuzzleCatalog()).ForPlayer();
+        Guid id = (await firstStore.AddAsync(new GameSession(new Puzzle(3, 99), 2,
+            new IMathOperation[] { new MathOperation(5) }), TestPlayer.Id))!.Value;
+        var otherGame = CreatedState(await firstController.Create());
+        repository.PausedSession = id;
 
-        // Pause the first operation inside Apply to create a controlled overlap between requests.
-        var first = OnThread(() => new SessionController(store).ApplyMove(id, new ApplyMoveRequest(1)));
-        var tasks = new List<Task> { first };
+        // Two API instances have separate locks. Pause both before saving the same old revision,
+        // so the repository must resolve the race instead of relying on an in-process lock.
+        Guid? requestId = sameRequestId ? Guid.NewGuid() : null;
+        var first = firstController.ApplyMove(id, new ApplyMoveRequest(1, requestId: requestId));
+        var duplicate = secondController.ApplyMove(id, new ApplyMoveRequest(1, requestId: requestId));
         try
         {
-            Assert.True(operation.Entered.Wait(TimeSpan.FromSeconds(5)), "The first move did not start.");
+            await repository.BothEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-            // Separate controller instances simulate separate HTTP requests sharing one store.
-            var duplicate = OnThread(() => new SessionController(store).ApplyMove(id, new ApplyMoveRequest(1)));
-            var read = OnThread(() => new SessionController(store).GetById(id));
-            var independent = OnThread(() => new SessionController(store).ApplyMove(otherGame.SessionId, new ApplyMoveRequest(1)));
-            tasks.Add(duplicate);
-            tasks.Add(read);
-            tasks.Add(independent);
+            // During the pending write a reader sees the complete previous state, never half a move.
+            AssertState(MoveState(await firstController.GetById(id)), 3, 0, 1);
+            AssertState(MoveState(await independentController.ApplyMove(otherGame.SessionId, new ApplyMoveRequest(1))), 7, 1, 2, 3);
+            repository.Release.TrySetResult();
 
-            // Another game's move can finish while the first game's operation is paused.
-            AssertState(MoveState(await independent.WaitAsync(TimeSpan.FromSeconds(5))), 8, 1, 2, 3);
-
-            // Give the same-game requests a chance to reach the paused writer's lock.
-            await Task.WhenAny(Task.WhenAll(duplicate, read), Task.Delay(200));
-            operation.Release.Set();
-
-            AssertState(MoveState(await first.WaitAsync(TimeSpan.FromSeconds(5))), 8, 1);
-            AssertProblem(await duplicate.WaitAsync(TimeSpan.FromSeconds(5)), StatusCodes.Status409Conflict);
-            AssertState(MoveState(await read.WaitAsync(TimeSpan.FromSeconds(5))), 8, 1);
-            Assert.Equal(1, operation.ApplyCalls);
+            var results = await Task.WhenAll(first, duplicate).WaitAsync(TimeSpan.FromSeconds(5));
+            var accepted = MoveState(results.OfType<OkObjectResult>().First());
+            AssertState(accepted, 8, 1);
+            if (sameRequestId)
+                Assert.All(results, result => AssertState(MoveState(result), 8, 1));
+            else
+            {
+                Assert.Single(results.OfType<OkObjectResult>());
+                AssertProblem(Assert.Single(results, result => result is not OkObjectResult), StatusCodes.Status409Conflict);
+            }
+            var restored = MoveState(await secondController.GetById(id));
+            AssertState(restored, 8, 1);
+            Assert.NotNull(accepted.ElapsedSeconds);
+            Assert.Equal(accepted.ElapsedSeconds, restored.ElapsedSeconds);
         }
         finally
         {
-            // Release and join workers even when an assertion fails, keeping the test bounded.
-            operation.Release.Set();
-            await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(10));
+            repository.Release.TrySetResult();
+            await Task.WhenAll(first, duplicate).WaitAsync(TimeSpan.FromSeconds(5));
         }
     }
 
-    private static IMathOperation[] DemoOperations()
+    private static IMathOperation[] GuardTestOperations()
     {
         return new IMathOperation[]
         {
@@ -168,7 +255,7 @@ public class SessionControllerTests
 
     private static SessionResponse CreatedState(IActionResult result)
     {
-        var created = Assert.IsType<ObjectResult>(result);
+        var created = Assert.IsType<CreatedAtActionResult>(result);
         Assert.Equal(StatusCodes.Status201Created, created.StatusCode);
         return Assert.IsType<SessionResponse>(created.Value);
     }
@@ -205,37 +292,31 @@ public class SessionControllerTests
         Assert.False(string.IsNullOrWhiteSpace(problem.Detail));
     }
 
-    private static Task<IActionResult> OnThread(Func<IActionResult> action)
+    private sealed class PausingRepository : IGameStateRepository
     {
-        return Task.Factory.StartNew(action, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
-    }
+        private readonly InMemoryGameStateRepository _inner = new();
+        private int _pending;
+        public Guid PausedSession { get; set; }
+        public TaskCompletionSource BothEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private sealed class PausingOperation : IMathOperation, IDisposable
-    {
-        private int _applyCalls;
-        public ManualResetEventSlim Entered { get; } = new ManualResetEventSlim(false);
-        public ManualResetEventSlim Release { get; } = new ManualResetEventSlim(false);
-        public int ApplyCalls => Volatile.Read(ref _applyCalls);
-        public string Description => "Add 5";
-
-        public int Apply(int input)
+        public Task<SessionDocument?> FindAsync(Guid id, string playerId, DateTimeOffset now, CancellationToken cancellationToken = default) =>
+            _inner.FindAsync(id, playerId, now, cancellationToken);
+        public Task<bool> TryCreateAsync(SessionDocument document, int perPlayer, int total, DateTimeOffset now, CancellationToken cancellationToken = default) =>
+            _inner.TryCreateAsync(document, perPlayer, total, now, cancellationToken);
+        public async Task<bool> TrySaveAsync(SessionDocument document, int expectedRevision, RouteDocument? route, DateTimeOffset now,
+            CancellationToken cancellationToken = default)
         {
-            if (Interlocked.Increment(ref _applyCalls) == 1)
+            if (document.Id == PausedSession)
             {
-                Entered.Set();
-                if (!Release.Wait(TimeSpan.FromSeconds(10)))
-                {
-                    throw new TimeoutException("The test did not release the paused operation.");
-                }
+                if (Interlocked.Increment(ref _pending) == 2) BothEntered.TrySetResult();
+                await Release.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
             }
-
-            return input + 5;
+            return await _inner.TrySaveAsync(document, expectedRevision, route, now, cancellationToken);
         }
-
-        public void Dispose()
-        {
-            Entered.Dispose();
-            Release.Dispose();
-        }
+        public Task<IReadOnlyList<RouteDocument>> GetRoutesAsync(string playerId, string key, DateTimeOffset now,
+            CancellationToken cancellationToken = default) => _inner.GetRoutesAsync(playerId, key, now, cancellationToken);
+        public Task CleanupAsync(DateTimeOffset now, CancellationToken cancellationToken = default) => _inner.CleanupAsync(now, cancellationToken);
     }
+
 }

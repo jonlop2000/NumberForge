@@ -1,136 +1,76 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using NumberForge.Api.Contracts;
+using NumberForge.Api.Security;
 using NumberForge.Api.Services;
 using NumberForge.Core;
 
 namespace NumberForge.Api.Controllers;
 
 [ApiController]
+[Authorize]
 [Route("api/sessions")]
-public class SessionController : ControllerBase
+public sealed class SessionController(GameSessionStore sessionStore, PuzzleCatalog catalog, TimeProvider? clock = null) : ControllerBase
 {
-    private readonly GameSessionStore _sessionStore;
-
-    public SessionController(GameSessionStore sessionStore)
-    {
-        _sessionStore = sessionStore;
-    }
+    private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+    private string PlayerId => PlayerIdentity.GetRequiredId(User);
 
     [HttpPost]
-    public IActionResult Create()
+    public async Task<IActionResult> Create([FromQuery] string puzzleId = PuzzleCatalog.DefaultPuzzleId, CancellationToken cancellationToken = default)
     {
-        var puzzle = new Puzzle(3, 12);
-        List<IMathOperation> startingOperations = new List<IMathOperation>
+        var definition = catalog.Get(puzzleId);
+        if (definition is null) return Problem(statusCode: 404, title: "Puzzle not found", detail: "Choose a puzzle from today's set or practice.");
+        DateTimeOffset? playUntil = DailyPuzzleService.TryParsePuzzleId(definition.Id, out var date, out _)
+            ? new DateTimeOffset(date.AddDays(1).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero) : null;
+        if (playUntil <= _clock.GetUtcNow()) return Problem(statusCode: 410, title: "This daily set has ended");
+        Guid? id = await sessionStore.AddAsync(new GameSession(definition), PlayerId, playUntil, cancellationToken);
+        if (id is null)
         {
-            new MathOperation(5),
-            new MultiplyOperation(2),
-            new MathOperation(-4)
-        };
-        var session = new GameSession(puzzle, 3, startingOperations);
-
-        Guid sessionId = _sessionStore.Add(session);
-
-        // Capture the response under the same per-game lock used by GET and move requests.
-        SessionResponse response;
-        lock (_sessionStore.GetLock(sessionId))
-        {
-            response = ToResponse(sessionId, session);
+            Response.Headers.RetryAfter = "60";
+            return Problem(statusCode: 429, title: "Attempt limit reached", detail: "Continue an existing attempt or try again later.");
         }
-
-        return StatusCode(StatusCodes.Status201Created, response);
+        var state = await sessionStore.GetAsync(id.Value, PlayerId, cancellationToken);
+        return CreatedAtAction(nameof(GetById), new { sessionId = id.Value }, await ToResponse(state!, cancellationToken));
     }
 
     [HttpGet("{sessionId:guid}")]
-    public IActionResult GetById(Guid sessionId)
+    public async Task<IActionResult> GetById(Guid sessionId, CancellationToken cancellationToken = default)
     {
-        var session = _sessionStore.Get(sessionId);
-
-        if (session is null)
-        {
-            return NotFound();
-        }
-
-        // Wait for any move in progress so the cards and counters describe one consistent state.
-        lock (_sessionStore.GetLock(sessionId))
-        {
-            return Ok(ToResponse(sessionId, session));
-        }
+        // A missing game and another player's game deliberately have the same response.
+        var state = await sessionStore.GetAsync(sessionId, PlayerId, cancellationToken);
+        return state is null ? NotFound() : Ok(await ToResponse(state, cancellationToken));
     }
 
-    // Read the session ID from the URL and the selected card ID from the JSON request body.
     [HttpPost("{sessionId:guid}/moves")]
-    public IActionResult ApplyMove(Guid sessionId, [FromBody] ApplyMoveRequest request)
+    public async Task<IActionResult> ApplyMove(Guid sessionId, [FromBody] ApplyMoveRequest request, CancellationToken cancellationToken = default)
     {
-        var session = _sessionStore.Get(sessionId);
-        if (session is null)
+        var result = await sessionStore.ApplyAsync(sessionId, PlayerId, request.OperationId, request.ExpectedRevision, request.RequestId, cancellationToken);
+        return result.Status switch
         {
-            return NotFound();
-        }
-
-        // Keep validation, applying the move, and taking its snapshot together.
-        // A second request for the same game waits here until the first finishes.
-        lock (_sessionStore.GetLock(sessionId))
-        {
-            if (request.OperationId < 1 || request.OperationId > session.StartingOperations.Count)
-            {
-                // Problem returns a standard JSON error description with the chosen HTTP status.
-                return Problem(
-                    statusCode: StatusCodes.Status400BadRequest,
-                    title: "Invalid operation ID",
-                    detail: "Choose a card from this game's starting hand.");
-            }
-
-            // IDs refer to original positions, even after other cards have been removed.
-            var operation = session.StartingOperations[request.OperationId - 1];
-
-            // Core owns the arithmetic, card consumption, move limit, and target checks.
-            bool accepted = session.TryApplyOperation(operation);
-            if (!accepted)
-            {
-                // The ID exists, but using it conflicts with the game's current state.
-                return Problem(
-                    statusCode: StatusCodes.Status409Conflict,
-                    title: "Move rejected",
-                    detail: "This card has already been used or the game has ended.");
-            }
-
-            // The DTO copies the updated state before another request can change the game.
-            return Ok(ToResponse(sessionId, session));
-        }
+            MoveStatus.Accepted => Ok(await ToResponse(result.State!, cancellationToken)),
+            MoveStatus.NotFound => NotFound(),
+            MoveStatus.Expired => Problem(statusCode: 410, title: "This daily set has ended", detail: "Choose a puzzle from today's set."),
+            MoveStatus.InvalidOperation => Problem(statusCode: 400, title: "Invalid operation ID", detail: "Choose a card from this game's starting hand."),
+            _ => Problem(statusCode: 409, title: "Move rejected", detail: "Refresh this attempt. The card, revision, or game state has changed.")
+        };
     }
 
-    // Call while holding this game's lock so all response fields come from the same moment.
-    private static SessionResponse ToResponse(Guid sessionId, GameSession session)
+    private async Task<SessionResponse> ToResponse(SessionState state, CancellationToken cancellationToken)
     {
-        var operationResponses = new List<OperationResponse>();
-
-        for (int i = 0; i < session.StartingOperations.Count; i++)
-        {
-            var operation = session.StartingOperations[i];
-
-            if (session.AvailableOperations.Contains(operation))
-            {
-                operationResponses.Add(new OperationResponse(i + 1, operation.Description));
-            }
-        }
-
-        // Translate Core's move records into API contracts, preserving their original order.
-        var moveResponses = new List<MoveResponse>();
-        foreach (var move in session.History)
-        {
-            moveResponses.Add(new MoveResponse(
-                move.BeforeNumber,
-                move.OperationDescription,
-                move.AfterNumber));
-        }
-
-        return new SessionResponse(
-            sessionId,
-            session.CurrentNumber,
-            session.Puzzle.TargetNumber,
-            session.MovesUsed,
-            session.MaxMoves,
-            operationResponses,
-            moveResponses);
+        var game = state.Game;
+        var definition = game.Definition;
+        string? key = definition is null ? null : RouteIdentity.GetCollectionKey(definition);
+        var discoveries = key is null ? null : await sessionStore.GetRoutesAsync(PlayerId, key, cancellationToken);
+        bool won = game.Puzzle.IsTargetReached(game.CurrentNumber);
+        bool expired = state.Document.PlayUntilUtc <= _clock.GetUtcNow();
+        string status = won ? "won" : game.IsFinished ? "lost" : expired ? "expired" : "active";
+        return new SessionResponse(state.Document.Id, game.CurrentNumber, game.Puzzle.TargetNumber, game.MovesUsed, game.MaxMoves,
+            game.StartingOperations.Select((op, index) => (op, index)).Where(c => game.AvailableOperations.Contains(c.op))
+                .Select(c => new OperationResponse(c.index + 1, c.op.Description)).ToArray(),
+            game.History.Select(m => new MoveResponse(m.BeforeNumber, m.OperationDescription, m.AfterNumber)).ToArray(),
+            game.Charm == CharmType.Echo ? new CharmResponse("Echo", "Your first positive addition activates twice.", game.EchoUsed) : null,
+            definition?.Id, definition?.Name, state.ElapsedSeconds, game.IsPerfect, key,
+            discoveries?.Count > 0 ? definition!.TotalRoutes : null, RouteIdentity.GetWinningRouteId(game),
+            state.Document.Revision, state.Document.PlayUntilUtc, state.Document.ExpiresAtUtc, status);
     }
 }
